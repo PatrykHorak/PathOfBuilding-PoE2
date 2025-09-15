@@ -493,7 +493,37 @@ Highest Weight - Displays the order retrieved from trade]]
 		-- the deallocated socket controls were still showing, so this will remove all dynamically created controls from items
 		wipeItemControls()
 	end)
-
+	main.tradeModeOption = main.tradeModeOption or "available"
+	local tradeModeLabels = {
+		"Instant Buyout and In Person Trade",
+		"Instant Buyout Only",
+		"In Person Trade Only",
+		"Any",
+	}
+	local tradeModeValues = { "available", "securable", "online", "any" }
+	if not self.controls.tradeMode then
+		self.controls.tradeMode = new("DropDownControl",
+			{ "BOTTOMLEFT", self.controls.close, "BOTTOMRIGHT" },
+			{115, 0, 250, 20},
+			tradeModeLabels,
+			function(idx)
+				main.tradeModeOption = tradeModeValues[idx]
+			end
+		)
+	if not self.controls.tradeModeLabel then
+		self.controls.tradeModeLabel = new("LabelControl",
+			{ "RIGHT", self.controls.tradeMode, "LEFT" },
+			{ -6, 0, 0, 16 },
+			"Trade:"
+		)
+	end
+		local idx = 1
+		for i, v in ipairs(tradeModeValues) do
+			if v == (main.tradeModeOption or "available") then idx = i break end
+		end
+		self.controls.tradeMode:SetSel(idx)
+		self.controls.tradeMode.tooltipText = "Controls PoE2 trade type for searches/links."
+	end
 	-- used in PopupDialog:Draw()
 	local function scrollBarFunc()
 		self.controls.scrollBar.height = self.pane_height-100
@@ -735,9 +765,12 @@ function TradeQueryClass:UpdateControlsWithItems(row_idx)
 	end
 
 	self.sortedResultTbl[row_idx] = sortedItems
+	if not self.controls["priceButton"..row_idx] or not self.controls["resultDropdown"..row_idx] then
+		return
+	end
 	local pb_index = self.sortedResultTbl[row_idx][1].index
 	self.itemIndexTbl[row_idx] = pb_index
-	self.controls["priceButton".. row_idx].tooltipText = "Sorted by " .. self.itemSortSelectionList[self.pbItemSortSelectionIndex]
+	self.controls["priceButton"..row_idx].tooltipText = "Sorted by " .. self.itemSortSelectionList[self.pbItemSortSelectionIndex]
 	self.totalPrice[row_idx] = {
 		currency = self.resultTbl[row_idx][pb_index].currency,
 		amount = self.resultTbl[row_idx][pb_index].amount,
@@ -852,12 +885,24 @@ function TradeQueryClass:PriceItemRowDisplay(row_idx, top_pane_alignment_ref, ro
 				self:SetNotice(context.controls.pbNotice, "")
 			end
 			if main.POESESSID == nil or main.POESESSID == "" then
+				local jq = dkjson.decode(query)
+				if jq and jq.query and self.pbRealm == "poe2" then
+					jq.query.status = { option = (main.tradeModeOption or "available") }
+					query = dkjson.encode(jq)
+				end
 				local url = self.tradeQueryRequests:buildUrl(self.hostName .. "trade2/search", self.pbRealm, self.pbLeague)
 				url = url .. "?q=" .. urlEncode(query)
 				controls["uri"..context.row_idx]:SetText(url, true)
 				return
 			end
 			context.controls["priceButton"..context.row_idx].label = "Searching..."
+			do
+				local jq = dkjson.decode(query)
+				if jq and jq.query and self.pbRealm == "poe2" then
+					jq.query.status = { option = (main.tradeModeOption or "available") }
+					query = dkjson.encode(jq)
+				end
+			end
 			self.tradeQueryRequests:SearchWithQueryWeightAdjusted(self.pbRealm, self.pbLeague, query,
 				function(items, errMsg)
 					if errMsg then
@@ -954,9 +999,17 @@ function TradeQueryClass:PriceItemRowDisplay(row_idx, top_pane_alignment_ref, ro
 		local item = new("Item", self.resultTbl[row_idx][sortedResult.index].item_string)
 		table.insert(dropdownLabels, colorCodes[item.rarity]..item.name)
 	end
-	controls["resultDropdown"..row_idx] = new("DropDownControl", { "TOPLEFT", controls["changeButton"..row_idx], "TOPRIGHT"}, {8, 0, 325, row_height}, dropdownLabels, function(index)
+	controls["resultDropdown"..row_idx] = new("DropDownControl", { "TOPLEFT", controls["changeButton"..row_idx], "TOPRIGHT" }, {8, 0, 325, row_height}, dropdownLabels, function(index)
 		self.itemIndexTbl[row_idx] = self.sortedResultTbl[row_idx][index].index
 		self:SetFetchResultReturn(row_idx, self.itemIndexTbl[row_idx])
+		local r = self.resultTbl[row_idx] and self.resultTbl[row_idx][self.itemIndexTbl[row_idx]]
+		if r and r.whisper_token and r.whisper_token ~= "" then
+			self.tradeQueryRequests:RequestWhisper(r.whisper_token, function(text)
+				if text and text ~= "" then
+					self.resultTbl[row_idx][self.itemIndexTbl[row_idx]].whisper = text
+				end
+			end)
+		end
 	end)
 	local function addCompareTooltip(tooltip, result_index, dbMode)
 		local result = self.resultTbl[row_idx][result_index]
@@ -999,20 +1052,97 @@ function TradeQueryClass:PriceItemRowDisplay(row_idx, top_pane_alignment_ref, ro
 	controls["importButton"..row_idx].enabled = function()
 		return self.itemIndexTbl[row_idx] and self.resultTbl[row_idx][self.itemIndexTbl[row_idx]].item_string ~= nil
 	end
-	-- Whisper so we can copy to clipboard
-	controls["whisperButton"..row_idx] = new("ButtonControl", { "TOPLEFT", controls["importButton"..row_idx], "TOPRIGHT"}, {8, 0, 185, row_height}, function()
-		return self.totalPrice[row_idx] and "Whisper for " .. self.totalPrice[row_idx].amount .. " " .. self.totalPrice[row_idx].currency or "Whisper"
-	end, function()
-		Copy(self.resultTbl[row_idx][self.itemIndexTbl[row_idx]].whisper)
-	end)
-	controls["whisperButton"..row_idx].enabled = function()
-		return self.itemIndexTbl[row_idx] and self.resultTbl[row_idx][self.itemIndexTbl[row_idx]].whisper ~= nil
-	end
-	controls["whisperButton"..row_idx].tooltipFunc = function(tooltip)
-		tooltip:Clear()
-		if self.itemIndexTbl[row_idx] and self.resultTbl[row_idx][self.itemIndexTbl[row_idx]].item_string then
-			tooltip.center = true
-			tooltip:AddLine(16, "Copies the item purchase whisper to the clipboard")
+	controls["actionButton"..row_idx] = new("ButtonControl",
+    { "TOPLEFT", controls["importButton"..row_idx], "TOPRIGHT" },
+    { 8, 0, 185, row_height },
+    function()
+        local idx = self.itemIndexTbl[row_idx] or 1
+        local r = self.resultTbl[row_idx] and self.resultTbl[row_idx][idx]
+        local hasTravel = r and r.token and r.token ~= ""
+        if hasTravel then
+            return "Travel to Hideout"
+        end
+        if self.totalPrice[row_idx] then
+            return "Whisper for " .. self.totalPrice[row_idx].amount .. " " .. (self.totalPrice[row_idx].currency or "")
+        end
+        return "Whisper"
+    end,
+    function()
+        local idx = self.itemIndexTbl[row_idx] or 1
+        local r = self.resultTbl[row_idx] and self.resultTbl[row_idx][idx]
+        if not r then
+            self:SetNotice(self.controls.pbNotice, "Error: No item selected")
+            return
+        end
+        local hasTravel = r.token and r.token ~= ""
+        local hasWhisperToken = r.whisper_token and r.whisper_token ~= ""
+        if hasTravel then
+            if not (main.POESESSID and main.POESESSID ~= "") then
+                self:SetNotice(self.controls.pbNotice, "Error: POESESSID required for travel")
+                return
+            end
+            self.tradeQueryRequests:TravelToHideout(r.token, function(ok, err)
+                if not ok then
+                    self:SetNotice(self.controls.pbNotice, "Error: " .. tostring(err or "travel failed"))
+                end
+            end)
+            return
+        end
+        if hasWhisperToken then
+            if not (main.POESESSID and main.POESESSID ~= "") then
+                self:SetNotice(self.controls.pbNotice, "Error: POESESSID required to whisper")
+                return
+            end
+            self.tradeQueryRequests:SendWhisper(r.whisper_token, function(ok, err)
+                if not ok then
+                    self:SetNotice(self.controls.pbNotice, "Error: " .. tostring(err or "whisper failed"))
+                end
+            end)
+            return
+        end
+        if r.whisper and r.whisper ~= "" then
+            Copy(r.whisper)
+            return
+        end
+        if r.whisper_token and r.whisper_token ~= "" then
+            if not (main.POESESSID and main.POESESSID ~= "") then
+                self:SetNotice(self.controls.pbNotice, "Error: POESESSID required to fetch whisper")
+                return
+            end
+            self.tradeQueryRequests:RequestWhisper(r.whisper_token, function(text, err)
+                if not text then
+                    self:SetNotice(self.controls.pbNotice, "Error: " .. tostring(err or "missing whisper"))
+                    return
+                end
+                Copy(text)
+            end)
+            return
+        end
+        self:SetNotice(self.controls.pbNotice, "Error: Missing whisper data")
+    end
+)
+controls["actionButton"..row_idx].enabled = function()
+    local idx = self.itemIndexTbl[row_idx] or 1
+    local r = self.resultTbl[row_idx] and self.resultTbl[row_idx][idx]
+    if not r then return false end
+    if r.token and r.token ~= "" then
+        return (main.POESESSID and main.POESESSID ~= "")
+    end
+    return r.whisper ~= nil or (r.whisper_token and r.whisper_token ~= "")
+end
+controls["actionButton"..row_idx].tooltipFunc = function(tooltip)
+    tooltip:Clear()
+    local idx = self.itemIndexTbl[row_idx] or 1
+    local r = self.resultTbl[row_idx] and self.resultTbl[row_idx][idx]
+    if r and r.token and r.token ~= "" then
+        tooltip:AddLine(16, "Send travel-to-hideout request for this listing.")
+    elseif r and r.whisper_token and r.whisper_token ~= "" then
+        tooltip:AddLine(16, "Send whisper via API to the game client.")
+        if not (main.POESESSID and main.POESESSID ~= "") then
+            tooltip:AddLine(16, "^7(Requires valid POESESSID)")
+        end
+    else
+			tooltip:AddLine(16, "Copies whisper to clipboard.")
 		end
 	end
 end
