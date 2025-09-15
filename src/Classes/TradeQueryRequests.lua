@@ -30,13 +30,16 @@ function TradeQueryRequestsClass:ProcessQueue()
 				local requestId = self.rateLimiter:InsertRequest(policy)
 				local onComplete = function(response, errMsg)
 					self.rateLimiter:FinishRequest(policy, requestId)
-					self.rateLimiter:UpdateFromHeader(response.header)
-					if response.header:match("HTTP/[%d%.]+ (%d+)") == "429" then
+					local hdr = response and response.header or ""
+					if not request.skipRateLimitUpdate and hdr:match("X%-Rate%-Limit%-Rules") then
+						self.rateLimiter:UpdateFromHeader(hdr)
+					end
+					if hdr:match("HTTP/[%d%.]+ (%d+)") == "429" then
 						table.insert(queue, 1, request)
 						return
 					end
-					-- if limit rules don't return account then the POESESSID is invalid.
-					if response.header:match("X%-Rate%-Limit%-Rules: (.-)\n"):match("Account") == nil and main.POESESSID ~= "" then
+					local rules = hdr:match("X%-Rate%-Limit%-Rules: (.-)\n")
+					if rules and rules:match("Account") == nil and main.POESESSID ~= "" then
 						main.POESESSID = ""
 						if errMsg then
 							errMsg = errMsg .. "\nPOESESSID is invalid. Please Re-Log and reset"
@@ -47,9 +50,12 @@ function TradeQueryRequestsClass:ProcessQueue()
 					request.callback(response.body, errMsg, unpack(request.callbackParams or {}))
 				end
 				-- self:SendRequest(request.url , onComplete, {body = request.body, poesessid = main.POESESSID})
-				local header = "Content-Type: application/json"
+				local header = request.header or "Content-Type: application/json"
 				if main.POESESSID ~= "" then
 					header = header .. "\nCookie: POESESSID=" .. main.POESESSID
+				end
+				if request.headerExtra and #request.headerExtra > 0 then
+					header = header .. "\n" .. request.headerExtra
 				end
 				launch:DownloadPage(request.url, onComplete, {
 					header = header,
@@ -185,6 +191,13 @@ end
 ---@param query string
 ---@param callback fun(response:table, errMsg:string)
 function TradeQueryRequestsClass:PerformSearch(realm, league, query, callback)
+	do
+	local patched = dkjson.decode(query)
+	if patched and patched.query and realm == "poe2" then
+			patched.query.status = { option = (main.tradeModeOption or "available") }
+			query = dkjson.encode(patched)
+		end
+	end
 	table.insert(self.requestQueue["search"], {
 		url = self:buildUrl(self.hostName .. "api/trade2/search", realm, league),
 		body = query,
@@ -409,11 +422,16 @@ function TradeQueryRequestsClass:FetchResultBlock(url, callback)
 				end
 				
 
+				local listing = trade_entry.listing or {}
+				local hideout_token = listing.hideout_token
+				local whisper_token = listing.whisper_token
 				table.insert(items, {
-					amount = trade_entry.listing.price.amount,
-					currency = trade_entry.listing.price.currency,
+					amount = listing.price and listing.price.amount or nil,
+					currency = listing.price and listing.price.currency or nil,
 					item_string = table.concat(rawLines, "\n"),
-					whisper = trade_entry.listing.whisper,
+					whisper = listing.whisper,
+					token = hideout_token,
+					whisper_token = whisper_token,
 					weight = trade_entry.item.pseudoMods and trade_entry.item.pseudoMods[1]:match("Sum: (.+)") or "0",
 					id = trade_entry.id
 				})
@@ -421,6 +439,91 @@ function TradeQueryRequestsClass:FetchResultBlock(url, callback)
 			return callback(items)
 		end
 	})
+end
+
+function TradeQueryRequestsClass:TravelToHideout(token, callback)
+    if not token or token == "" then
+        return callback(false, "Missing listing token")
+    end
+    table.insert(self.requestQueue["fetch"], {
+        url = self.hostName .. "api/trade2/whisper",
+        body = dkjson.encode({ token = token }),
+        skipRateLimitUpdate = true,
+        headerExtra = table.concat({
+            "Origin: https://www.pathofexile.com",
+            "X-Requested-With: XMLHttpRequest",
+            "Referer: https://www.pathofexile.com/trade2",
+        }, "\n"),
+        callback = function(response, errMsg)
+            if errMsg then
+                if tostring(errMsg):find("Response code: 403") then
+                    return callback(false, "Forbidden (check POESESSID)")
+                end
+                return callback(false, errMsg)
+            end
+            local ok, obj = pcall(dkjson.decode, response)
+            if not ok or type(obj) ~= "table" or not obj.success then
+                return callback(false, "Travel failed")
+            end
+            callback(true, nil)
+        end
+    })
+end
+
+function TradeQueryRequestsClass:SendWhisper(token, callback)
+    if not token or token == "" then
+        return callback(false, "Missing whisper token")
+    end
+    table.insert(self.requestQueue["fetch"], {
+        url = self.hostName .. "api/trade2/whisper",
+        body = dkjson.encode({ token = token }),
+        skipRateLimitUpdate = true,
+        headerExtra = table.concat({
+            "Origin: https://www.pathofexile.com",
+            "X-Requested-With: XMLHttpRequest",
+            "Referer: https://www.pathofexile.com/trade2",
+        }, "\n"),
+        callback = function(response, errMsg)
+            if errMsg then
+                if tostring(errMsg):find("Response code: 403") then
+                    return callback(false, "Forbidden (check POESESSID)")
+                end
+                return callback(false, errMsg)
+            end
+            local ok, obj = pcall(dkjson.decode, response)
+            if not ok or type(obj) ~= "table" or not obj.success then
+                return callback(false, "Whisper failed")
+            end
+            callback(true, nil)
+        end
+    })
+end
+
+function TradeQueryRequestsClass:RequestWhisper(token, callback)
+    if not token or token == "" then
+        return callback(nil, "Missing whisper token")
+    end
+    table.insert(self.requestQueue["fetch"], {
+        url = self.hostName .. "api/trade2/whisper",
+        body = dkjson.encode({ token = token }),
+        skipRateLimitUpdate = true,
+        headerExtra = table.concat({
+            "Origin: https://www.pathofexile.com",
+            "X-Requested-With: XMLHttpRequest",
+            "Referer: https://www.pathofexile.com/trade2",
+        }, "\n"),
+        callback = function(response, errMsg)
+            if errMsg then
+                return callback(nil, errMsg)
+            end
+            local ok, obj = pcall(dkjson.decode, response)
+            local text = ok and type(obj)=="table" and (obj.whisper or obj.text or obj.message) or nil
+            if not text or text == "" then
+                return callback(nil, "Whisper text not present in response")
+            end
+            callback(text, nil)
+        end
+    })
 end
 
 ---@param callback fun(items:table, errMsg:string)
@@ -448,6 +551,11 @@ function TradeQueryRequestsClass:SearchWithURL(url, callback)
 		local json_data = dkjson.decode(query)
 		if not json_data or json_data.error then
 			errMsg = json_data and json_data.error or "Failed to parse search query JSON"
+		end
+		if json_data and json_data.query then
+			if realm == "poe2" then
+				json_data.query.status = { option = (main.tradeModeOption or "available") }
+			end
 		end
 		if json_data.query.stats and json_data.query.stats[1] and json_data.query.stats[1].type == "weight" then
 			json_data.sort = {}
